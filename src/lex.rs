@@ -4,9 +4,9 @@ use miette::{diagnostic, Error, LabeledSpan};
 
 #[derive(Debug)]
 pub struct Token<'de> {
-    kind: TokenKind,
-    origin: &'de str,
-    start: usize,
+    pub kind: TokenKind,
+    pub origin: &'de str,
+    pub start: usize,
 }
 
 #[derive(Debug)]
@@ -105,7 +105,7 @@ pub struct Lexer<'de> {
 }
 
 impl<'de> Lexer<'de> {
-    fn new(input: &'de str) -> Self {
+    pub fn new(input: &'de str) -> Self {
         Lexer {
             whole: input,
             rest: input,

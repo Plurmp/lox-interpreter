@@ -1,18 +1,20 @@
-use std::fmt::Display;
+use std::{fmt::Display, iter::Peekable};
 
-use miette::SourceOffset;
+use miette::{diagnostic, Context, Error, LabeledSpan};
+
+use crate::lex::{Lexer, Token, TokenKind};
 
 #[derive(Debug)]
-pub enum S<'a> {
+pub enum Expr<'a> {
     Atom(Atom<'a>),
-    Cons(Atom<'a>, Vec<S<'a>>),
+    Cons(Op, Vec<Expr<'a>>),
 }
 
-impl Display for S<'_> {
+impl Display for Expr<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            S::Atom(a) => write!(f, "{}", a),
-            S::Cons(a, rest) => {
+            Expr::Atom(a) => write!(f, "{}", a),
+            Expr::Cons(a, rest) => {
                 write!(f, "({}", a)?;
                 for s in rest {
                     write!(f, " {s}")?;
@@ -23,26 +25,27 @@ impl Display for S<'_> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum Atom<'a> {
     Number(f64),
     String(&'a str),
     Bool(bool),
     Nil,
+    Ident(&'a str),
 }
 
 impl Display for Atom<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Number(n) => write!(f, "{n:?}"),
-            Self::String(s) => write!(f, "{s}"),
+            Self::String(s) | Self::Ident(s) => write!(f, "{s}"),
             Self::Bool(b) => write!(f, "{b:?}"),
             Self::Nil => write!(f, "nil"),
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Op {
     Bang,
     Plus,
@@ -55,6 +58,8 @@ pub enum Op {
     LessEqual,
     Greater,
     GreaterEqual,
+    Field,
+    Group,
 }
 
 impl Display for Op {
@@ -74,7 +79,234 @@ impl Display for Op {
                 Op::LessEqual => "<=",
                 Op::Greater => ">",
                 Op::GreaterEqual => ">=",
+                Op::Field => ".",
+                Op::Group => "group",
             }
         )
     }
+}
+
+pub struct Parser<'a> {
+    whole: &'a str,
+    lexer: Peekable<Lexer<'a>>,
+}
+
+impl<'a> Parser<'a> {
+    pub fn new(input: &'a str) -> Self {
+        Self {
+            whole: input,
+            lexer: Lexer::new(input).peekable(),
+        }
+    }
+    pub fn expr(&mut self) -> Result<Expr<'a>, Error> {
+        self.expr_bp(0)
+    }
+    pub fn expr_bp(&mut self, min_bp: u8) -> Result<Expr<'a>, Error> {
+        let lhs = match self.lexer.next() {
+            Some(Ok(token)) => token,
+            None => return Ok(Expr::Atom(Atom::Nil)),
+            Some(Err(e)) => {
+                return Err(e).wrap_err("on left hand side");
+            }
+        };
+
+        let mut lhs = match lhs {
+            Token {
+                kind: TokenKind::Number(n),
+                ..
+            } => Expr::Atom(Atom::Number(n)),
+            Token {
+                kind: TokenKind::Ident,
+                origin,
+                ..
+            } => Expr::Atom(Atom::Ident(origin)),
+            Token {
+                kind: TokenKind::Bang | TokenKind::Minus,
+                ..
+            } => {
+                let op = match lhs.kind {
+                    TokenKind::Bang => Op::Bang,
+                    TokenKind::Minus => Op::Minus,
+                    _ => unreachable!("by outer match arm"),
+                };
+                let ((), r_bp) = prefix_binding_power(op);
+                let rhs = self.expr_bp(r_bp)?;
+                Expr::Cons(op, vec![rhs])
+            }
+            Token {
+                kind: TokenKind::LeftParen,
+                ..
+            } => {
+                let lhs = self.expr_bp(0).wrap_err("in parentheses")?;
+                let Some(Ok(Token {
+                    kind: TokenKind::RightParen,
+                    ..
+                })) = self.lexer.next()
+                else {
+                    return Err(diagnostic!("expected right parentheses").into());
+                };
+
+                Expr::Cons(Op::Group, vec![lhs])
+            }
+            token => {
+                return Err(diagnostic!(
+                    labels = vec![LabeledSpan::at(
+                        token.start..token.start + token.origin.len(),
+                        "here"
+                    )],
+                    "Expected a statement"
+                )
+                .into())
+            }
+        };
+
+        loop {
+            let op = self.lexer.peek();
+
+            if op.map_or(false, |op| op.is_err()) {
+                return Err(self
+                    .lexer
+                    .next()
+                    .expect("Checked Some above")
+                    .expect_err("checked Err above"))
+                .wrap_err("in place of expected Op");
+            }
+
+            let op = match op.map(|res| res.as_ref().expect("handled Err above")) {
+                None
+                | Some(Token {
+                    kind: TokenKind::RightParen,
+                    ..
+                }) => break,
+                Some(Token {
+                    kind: TokenKind::Plus,
+                    ..
+                }) => Op::Plus,
+                Some(Token {
+                    kind: TokenKind::Minus,
+                    ..
+                }) => Op::Minus,
+                Some(Token {
+                    kind: TokenKind::Star,
+                    ..
+                }) => Op::Star,
+                Some(Token {
+                    kind: TokenKind::Slash,
+                    ..
+                }) => Op::Slash,
+                Some(Token {
+                    kind: TokenKind::Dot,
+                    ..
+                }) => Op::Field,
+                Some(token) => {
+                    return Err(diagnostic!(
+                        labels = vec![LabeledSpan::at(
+                            token.start..token.start + token.origin.len(),
+                            "here"
+                        )],
+                        "Expected an operator, got {} instead",
+                        token
+                    )
+                    .into());
+                }
+            };
+
+            if let Some((l_bp, ())) = postfix_binding_power(op) {
+                if l_bp < min_bp {
+                    break;
+                }
+                self.lexer.next();
+
+                lhs = Expr::Cons(op, vec![lhs]);
+                continue;
+            }
+
+            if let Some((l_bp, r_bp)) = infix_binding_power(op) {
+                if l_bp < min_bp {
+                    break;
+                }
+                self.lexer.next();
+                let rhs = self
+                    .expr_bp(r_bp)
+                    .wrap_err_with(|| format!("on rhs of {lhs} {op}"))?;
+                lhs = Expr::Cons(op, vec![lhs, rhs]);
+                continue;
+            }
+
+            break;
+        }
+
+        Ok(lhs)
+    }
+}
+
+fn infix_binding_power(op: Op) -> Option<(u8, u8)> {
+    Some(match op {
+        Op::Plus | Op::Minus => (1, 2),
+        Op::Star | Op::Slash => (3, 4),
+        Op::Field => (8, 7),
+        _ => return None,
+    })
+}
+
+fn prefix_binding_power(op: Op) -> ((), u8) {
+    match op {
+        Op::Plus | Op::Minus => ((), 5),
+        _ => panic!("unexpected operator {op}"),
+    }
+}
+
+fn postfix_binding_power(op: Op) -> Option<(u8, ())> {
+    Some(match op {
+        _ => return None,
+    })
+}
+
+macro_rules! expr_test {
+    ($expression:literal, $s_str:literal) => {{
+        let s = Parser::new($expression).expr().unwrap();
+        assert_eq!(s.to_string(), $s_str);
+    }};
+}
+
+#[test]
+fn one() {
+    let s = Parser::new("1").expr().unwrap();
+    assert_eq!(s.to_string(), "1.0");
+}
+
+#[test]
+fn add_and_mult() {
+    let s = Parser::new("1 + 2 * 3").expr().unwrap();
+    assert_eq!(s.to_string(), "(+ 1.0 (* 2.0 3.0))");
+
+    let s = Parser::new("a + b * c * d + e").expr().unwrap();
+    assert_eq!(s.to_string(), "(+ (+ a (* (* b c) d)) e)");
+}
+
+#[test]
+fn field() {
+    let s = Parser::new("foo.bar").expr().unwrap();
+    assert_eq!(s.to_string(), "(. foo bar)");
+
+    let s = Parser::new("1 + 2 + f.g.h * 3 * 4").expr().unwrap();
+    assert_eq!(
+        s.to_string(),
+        "(+ (+ 1.0 2.0) (* (* (. f (. g h)) 3.0) 4.0))"
+    )
+}
+
+#[test]
+fn prefix() {
+    expr_test!("--1 * 2", "(* (- (- 1.0)) 2.0)");
+    expr_test!("--f.g", "(- (- (. f g)))");
+}
+
+#[test]
+fn groups() {
+    expr_test!("(((0)))", "(group (group (group 0.0)))");
+    expr_test!(
+        "(5 - (3 - 1)) + -1",
+        "(+ (group (- 5.0 (group (- 3.0 1.0)))) (- 1.0))"
+    )
 }
