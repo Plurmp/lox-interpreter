@@ -1,4 +1,4 @@
-use std::{fmt::Display, iter::Peekable};
+use std::{borrow::Cow, fmt::Display, iter::Peekable};
 
 use miette::{diagnostic, Context, Error, LabeledSpan};
 
@@ -28,7 +28,7 @@ impl Display for Expr<'_> {
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum Atom<'a> {
     Number(f64),
-    String(&'a str),
+    String(Cow<'a, str>),
     Bool(bool),
     Nil,
     Ident(&'a str),
@@ -38,7 +38,8 @@ impl Display for Atom<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Number(n) => write!(f, "{n:?}"),
-            Self::String(s) | Self::Ident(s) => write!(f, "{s}"),
+            Self::String(s) => write!(f, "{s}"),
+            Self::Ident(i) => write!(f, "{i}"),
             Self::Bool(b) => write!(f, "{b:?}"),
             Self::Nil => write!(f, "nil"),
         }
@@ -148,6 +149,11 @@ impl<'a> Parser<'a> {
 
                 Expr::Cons(Op::Group, vec![lhs])
             }
+            Token {
+                kind: TokenKind::String,
+                origin,
+                ..
+            } => Expr::Atom(Atom::String(origin.trim_matches('"').into())),
             token => {
                 return Err(diagnostic!(
                     labels = vec![LabeledSpan::at(
@@ -198,6 +204,30 @@ impl<'a> Parser<'a> {
                     kind: TokenKind::Dot,
                     ..
                 }) => Op::Field,
+                Some(Token {
+                    kind: TokenKind::Greater,
+                    ..
+                }) => Op::Greater,
+                Some(Token {
+                    kind: TokenKind::GreaterEqual,
+                    ..
+                }) => Op::GreaterEqual,
+                Some(Token {
+                    kind: TokenKind::Less,
+                    ..
+                }) => Op::Less,
+                Some(Token {
+                    kind: TokenKind::LessEqual,
+                    ..
+                }) => Op::LessEqual,
+                Some(Token {
+                    kind: TokenKind::BangEqual,
+                    ..
+                }) => Op::BangEqual,
+                Some(Token {
+                    kind: TokenKind::EqualEqual,
+                    ..
+                }) => Op::EqualEqual,
                 Some(token) => {
                     return Err(diagnostic!(
                         labels = vec![LabeledSpan::at(
@@ -242,16 +272,18 @@ impl<'a> Parser<'a> {
 
 fn infix_binding_power(op: Op) -> Option<(u8, u8)> {
     Some(match op {
-        Op::Plus | Op::Minus => (1, 2),
-        Op::Star | Op::Slash => (3, 4),
-        Op::Field => (8, 7),
+        Op::Plus | Op::Minus => (5, 6),
+        Op::Star | Op::Slash => (7, 8),
+        Op::EqualEqual | Op::BangEqual => (1, 2),
+        Op::Less | Op::LessEqual | Op::Greater | Op::GreaterEqual => (3, 4),
+        Op::Field => (11, 10),
         _ => return None,
     })
 }
 
 fn prefix_binding_power(op: Op) -> ((), u8) {
     match op {
-        Op::Plus | Op::Minus => ((), 5),
+        Op::Plus | Op::Minus => ((), 9),
         _ => panic!("unexpected operator {op}"),
     }
 }

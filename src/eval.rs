@@ -1,65 +1,67 @@
 use crate::parse::{Atom, Expr, Op};
 
-fn eval_expr<'a>(s: &'a Expr) -> Atom<'a> {
-    match s {
-        Expr::Atom(atom) => atom.clone(),
-        Expr::Cons(op, rest) => {
-            if rest.len() == 2 {
-                let first = eval_expr(&rest[0]);
-                let second = eval_expr(&rest[1]);
+use miette::{diagnostic, Error};
 
-                match op {
-                    Op::Plus => {
-                        if let Atom::Number(first) = first && let Atom::Number(second) = second {
-                            Atom::Number(first + second)
-                        } else {
-                            todo!();
-                        }
-                    }
-                    Op::Star => {
-                        if let Atom::Number(first) = first && let Atom::Number(second) = second {
-                            Atom::Number(first * second)
-                        } else {
-                            todo!();
-                        }
-                    }
-                    Op::Minus => {
-                        if let Atom::Number(first) = first && let Atom::Number(second) = second {
-                            Atom::Number(first - second)
-                        } else {
-                            todo!();
-                        }
-                    }
-                    Op::Slash => {
-                        if let Atom::Number(first) = first && let Atom::Number(second) = second {
-                            Atom::Number(first / second)
-                        } else {
-                            todo!();
-                        }
-                    }
-                    _ => todo!(),
+pub fn eval_expr<'a>(s: &'a Expr) -> Result<Atom<'a>, Error> {
+    match s {
+        Expr::Atom(atom) => Ok(atom.clone()),
+        Expr::Cons(op, rest) => {
+            let first = rest.get(0).map(|f| eval_expr(f)).transpose()?;
+            let second = rest.get(1).map(|s| eval_expr(s)).transpose()?;
+            match (op, first, second) {
+                (Op::Group, Some(first), None) => Ok(first),
+                (Op::Plus, Some(Atom::Number(first)), Some(Atom::Number(second))) => {
+                    Ok(Atom::Number(first + second))
                 }
-            } else if rest.len() == 1 {
-                let first = eval_expr(&rest[0]);
-                
-                match op {
-                    Op::Group => {
-                        first
-                    }
-                    _ => todo!(),
+                (Op::Minus, Some(Atom::Number(first)), Some(Atom::Number(second))) => {
+                    Ok(Atom::Number(first - second))
                 }
-            } else {
-                todo!()
+                (Op::Star, Some(Atom::Number(first)), Some(Atom::Number(second))) => {
+                    Ok(Atom::Number(first * second))
+                }
+                (Op::Slash, Some(Atom::Number(first)), Some(Atom::Number(second))) => {
+                    Ok(Atom::Number(first / second))
+                }
+                (Op::Minus, Some(Atom::Number(first)), None) => Ok(Atom::Number(-first)),
+                (Op::Bang, Some(first), None) => Ok(Atom::Bool(!is_truthy(&first))),
+                (Op::Plus, Some(Atom::String(mut first)), Some(Atom::String(second))) => {
+                    first.to_mut().push_str(&second);
+                    Ok(Atom::String(first))
+                }
+                (Op::Greater, Some(Atom::Number(first)), Some(Atom::Number(second))) => {
+                    Ok(Atom::Bool(first > second))
+                }
+                (Op::GreaterEqual, Some(Atom::Number(first)), Some(Atom::Number(second))) => {
+                    Ok(Atom::Bool(first >= second))
+                }
+                (Op::Less, Some(Atom::Number(first)), Some(Atom::Number(second))) => {
+                    Ok(Atom::Bool(first < second))
+                }
+                (Op::LessEqual, Some(Atom::Number(first)), Some(Atom::Number(second))) => {
+                    Ok(Atom::Bool(first <= second))
+                }
+                (Op::BangEqual, Some(first), Some(second)) => Ok(Atom::Bool(first != second)),
+                (Op::EqualEqual, Some(first), Some(second)) => Ok(Atom::Bool(first == second)),
+                _ => Err(diagnostic!("malformed expression {s:?}").into()),
             }
         }
     }
 }
 
+fn is_truthy(atom: &Atom) -> bool {
+    match atom {
+        Atom::Bool(b) => *b,
+        Atom::Nil => false,
+        _ => true,
+    }
+}
+
+#[allow(unused)]
 macro_rules! test_eval {
     ($expression:literal, $final:expr) => {
         let expr = crate::parse::Parser::new($expression).expr().unwrap();
         println!("{expr}");
-        assert_eq!(eval_expr(&expr), $final);
+        assert_eq!(eval_expr(&expr).expect("Evaluation failed"), $final);
     };
 }
 
@@ -69,7 +71,7 @@ fn add_num() {
     test_eval!("1 + (1 + 1)", Atom::Number(3.0));
 }
 
-#[test] 
+#[test]
 fn mult_num() {
     test_eval!("1 * 2", Atom::Number(2.0));
     test_eval!("3 * 4 * (2 * 2)", Atom::Number(48.0));
@@ -85,4 +87,17 @@ fn sub_num() {
 fn div_num() {
     test_eval!("24 / 6", Atom::Number(4.0));
     test_eval!("50 / (20 / 2)", Atom::Number(5.0));
+}
+
+#[test]
+fn add_string() {
+    test_eval!(r#""foo" + "bar""#, Atom::String("foobar".into()));
+}
+
+#[test]
+fn comparison() {
+    test_eval!("4 > 5", Atom::Bool(false));
+    test_eval!("2 <= 2", Atom::Bool(true));
+    test_eval!("5 == 5", Atom::Bool(true));
+    test_eval!(r#""foo" == "foo""#, Atom::Bool(true));
 }
