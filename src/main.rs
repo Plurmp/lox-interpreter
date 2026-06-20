@@ -1,5 +1,7 @@
+mod eval;
 mod lex;
 mod parse;
+mod run;
 
 use std::fs::read_to_string;
 
@@ -7,6 +9,7 @@ use camino::Utf8PathBuf;
 use clap::{Parser as ClapParser, Subcommand};
 use miette::IntoDiagnostic;
 
+use eval::eval_expr;
 use lex::Lexer;
 use parse::Parser;
 
@@ -27,6 +30,9 @@ enum Commands {
         filename: Utf8PathBuf,
         #[arg(short, long)]
         expression: bool,
+    },
+    Evaluate {
+        filename: Utf8PathBuf,
     },
     Run {
         filename: Utf8PathBuf,
@@ -62,8 +68,18 @@ fn main() -> miette::Result<()> {
                 todo!()
             };
         }
+        Commands::Evaluate { filename } => {
+            let file_contents = read_to_string(filename).into_diagnostic()?;
+
+            let mut parser = Parser::new(&file_contents);
+            let expr = parser.expr()?;
+            println!("{}", eval_expr(&expr)?);
+        }
         Commands::Run { filename } => {
-            todo!()
+            let file_contents = read_to_string(filename).into_diagnostic()?;
+
+            let program = Parser::new(&file_contents).parse()?;
+            run::run(&program, &mut std::io::stdout())?;
         }
     }
 

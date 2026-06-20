@@ -1,6 +1,6 @@
 use std::{borrow::Cow, fmt::Display, iter::Peekable};
 
-use miette::{diagnostic, Context, Error, LabeledSpan};
+use miette::{diagnostic, Context, Diagnostic, Error, LabeledSpan};
 
 use crate::lex::{Lexer, Token, TokenKind};
 
@@ -15,7 +15,7 @@ impl Display for Expr<'_> {
         match self {
             Expr::Atom(a) => write!(f, "{}", a),
             Expr::Cons(a, rest) => {
-                write!(f, "({}", a)?;
+                write!(f, "({a}")?;
                 for s in rest {
                     write!(f, " {s}")?;
                 }
@@ -87,6 +87,36 @@ impl Display for Op {
     }
 }
 
+#[derive(Debug)]
+pub struct Program<'a> {
+    pub statements: Vec<Statement<'a>>,
+}
+
+impl Display for Program<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "(program")?;
+        for s in &self.statements {
+            write!(f, " {s}")?;
+        }
+        write!(f, ")")
+    }
+}
+
+#[derive(Debug)]
+pub enum Statement<'a> {
+    ExprStatement(Expr<'a>),
+    PrintStatement(Expr<'a>),
+}
+
+impl Display for Statement<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Statement::ExprStatement(expr) => write!(f, "(exprStatement {expr})"),
+            Statement::PrintStatement(expr) => write!(f, "(print {expr})"),
+        }
+    }
+}
+
 pub struct Parser<'a> {
     whole: &'a str,
     lexer: Peekable<Lexer<'a>>,
@@ -99,10 +129,44 @@ impl<'a> Parser<'a> {
             lexer: Lexer::new(input).peekable(),
         }
     }
+    pub fn parse(&mut self) -> Result<Program<'a>, Error> {
+        let mut statements = vec![];
+        while let Some(token) = self.lexer.peek() {
+            match token {
+                Ok(Token {
+                    kind: TokenKind::Print,
+                    ..
+                }) => {
+                    self.lexer.next();
+                    statements.push(Statement::PrintStatement(self.parse_expr_statement()?))
+                }
+                Ok(_) => statements.push(Statement::ExprStatement(self.parse_expr_statement()?)),
+                Err(_) => {
+                    return Err(match self.lexer.next().unwrap() {
+                        Err(e) => e,
+                        Ok(_) => unreachable!("peek was already Err"),
+                    })
+                }
+            }
+        }
+
+        Ok(Program { statements })
+    }
+    fn parse_expr_statement(&mut self) -> Result<Expr<'a>, Error> {
+        let expr = self.expr()?;
+        match self.lexer.next().transpose()? {
+            Some(Token {
+                kind: TokenKind::Semicolon,
+                ..
+            }) => Ok(expr),
+            Some(t) => Err(diagnostic!("Expected a semicolon at {}", t.origin).into()),
+            None => Err(diagnostic!("Unexpected EOF").into()),
+        }
+    }
     pub fn expr(&mut self) -> Result<Expr<'a>, Error> {
         self.expr_bp(0)
     }
-    pub fn expr_bp(&mut self, min_bp: u8) -> Result<Expr<'a>, Error> {
+    fn expr_bp(&mut self, min_bp: u8) -> Result<Expr<'a>, Error> {
         let lhs = match self.lexer.next() {
             Some(Ok(token)) => token,
             None => return Ok(Expr::Atom(Atom::Nil)),
@@ -181,7 +245,7 @@ impl<'a> Parser<'a> {
             let op = match op.map(|res| res.as_ref().expect("handled Err above")) {
                 None
                 | Some(Token {
-                    kind: TokenKind::RightParen,
+                    kind: TokenKind::RightParen | TokenKind::Semicolon,
                     ..
                 }) => break,
                 Some(Token {
@@ -341,4 +405,15 @@ fn groups() {
         "(5 - (3 - 1)) + -1",
         "(+ (group (- 5.0 (group (- 3.0 1.0)))) (- 1.0))"
     )
+}
+
+#[test]
+fn string() {
+    expr_test!(r#""Hello World""#, "Hello World");
+}
+
+#[test]
+fn print() {
+    let program = Parser::new(r#"print "Hello World";"#).parse().unwrap();
+    assert_eq!(program.to_string(), r#"(program (print Hello World))"#);
 }
