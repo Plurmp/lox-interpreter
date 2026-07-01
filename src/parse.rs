@@ -1,10 +1,10 @@
 use std::{borrow::Cow, fmt::Display, iter::Peekable};
 
-use miette::{diagnostic, Context, Diagnostic, Error, LabeledSpan};
+use miette::{diagnostic, miette, Context, Diagnostic, Error, LabeledSpan};
 
 use crate::lex::{Lexer, Token, TokenKind};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Expr<'a> {
     Atom(Atom<'a>),
     Cons(Op, Vec<Expr<'a>>),
@@ -106,6 +106,7 @@ impl Display for Program<'_> {
 pub enum Statement<'a> {
     ExprStatement(Expr<'a>),
     PrintStatement(Expr<'a>),
+    VarDecl(VarDecl<'a>),
 }
 
 impl Display for Statement<'_> {
@@ -113,8 +114,19 @@ impl Display for Statement<'_> {
         match self {
             Statement::ExprStatement(expr) => write!(f, "(exprStatement {expr})"),
             Statement::PrintStatement(expr) => write!(f, "(print {expr})"),
+            Statement::VarDecl(VarDecl { ident, expr }) => write!(
+                f,
+                "(varDecl {ident} {})",
+                expr.clone().map_or("".to_string(), |e| e.to_string())
+            ),
         }
     }
+}
+
+#[derive(Debug)]
+pub struct VarDecl<'a> {
+    pub ident: &'a str,
+    pub expr: Option<Expr<'a>>,
 }
 
 pub struct Parser<'a> {
@@ -129,10 +141,31 @@ impl<'a> Parser<'a> {
             lexer: Lexer::new(input).peekable(),
         }
     }
+    fn consume(&mut self, kind: TokenKind) -> Result<(), Error> {
+        match self.lexer.next().transpose()? {
+            Some(Token { kind: kind, .. }) => Ok(()),
+            Some(token) => Err(miette!(
+                labels = vec![LabeledSpan::at(
+                    token.start..(token.start + token.origin.len()),
+                    "here"
+                )],
+                help = format!("Unexpected token {token:?}"),
+                "Expected {kind:?}"
+            )),
+            None => Err(miette!("Unexpected EOF")),
+        }
+    }
     pub fn parse(&mut self) -> Result<Program<'a>, Error> {
         let mut statements = vec![];
         while let Some(token) = self.lexer.peek() {
             match token {
+                Ok(Token {
+                    kind: TokenKind::Var,
+                    ..
+                }) => {
+                    self.lexer.next();
+                    statements.push(Statement::VarDecl(self.parse_var_decl()?));
+                }
                 Ok(Token {
                     kind: TokenKind::Print,
                     ..
@@ -154,14 +187,57 @@ impl<'a> Parser<'a> {
     }
     fn parse_expr_statement(&mut self) -> Result<Expr<'a>, Error> {
         let expr = self.expr()?;
-        match self.lexer.next().transpose()? {
+        self.consume(TokenKind::Semicolon)?;
+
+        Ok(expr)
+    }
+    fn parse_var_decl(&mut self) -> Result<VarDecl<'a>, Error> {
+        let ident = match self.lexer.next().transpose()? {
+            Some(Token {
+                kind: TokenKind::Ident,
+                origin,
+                ..
+            }) => origin,
+            Some(t) => {
+                return Err(diagnostic!(
+                    "Unexpected token {} ({:?}) at {}",
+                    t.origin,
+                    t.kind,
+                    t.start
+                )
+                .into())
+            }
+            None => return Err(diagnostic!("Unexpected EOF").into()),
+        };
+
+        let expr = match self.lexer.next().transpose()? {
             Some(Token {
                 kind: TokenKind::Semicolon,
                 ..
-            }) => Ok(expr),
-            Some(t) => Err(diagnostic!("Expected a semicolon at {}", t.origin).into()),
-            None => Err(diagnostic!("Unexpected EOF").into()),
-        }
+            }) => None,
+            Some(Token {
+                kind: TokenKind::Equal,
+                ..
+            }) => {
+                dbg!(self.lexer.peek());
+                Some(self.expr()?)
+            }
+            Some(t) => {
+                return Err(miette!(
+                    "Unexpected token {} ({:?}) at {}",
+                    t.origin,
+                    t.kind,
+                    t.start
+                )
+                .wrap_err("in variable assignment expression")
+                .into())
+            }
+            None => return Err(diagnostic!("Unexpected EOF").into()),
+        };
+
+        self.consume(TokenKind::Semicolon)?;
+
+        Ok(VarDecl { ident, expr })
     }
     pub fn expr(&mut self) -> Result<Expr<'a>, Error> {
         self.expr_bp(0)
@@ -174,6 +250,8 @@ impl<'a> Parser<'a> {
                 return Err(e).wrap_err("on left hand side");
             }
         };
+
+        dbg!(&lhs);
 
         let mut lhs = match lhs {
             Token {
@@ -219,13 +297,15 @@ impl<'a> Parser<'a> {
                 ..
             } => Expr::Atom(Atom::String(origin.trim_matches('"').into())),
             token => {
-                return Err(diagnostic!(
+                return Err(miette!(
                     labels = vec![LabeledSpan::at(
                         token.start..token.start + token.origin.len(),
                         "here"
                     )],
-                    "Expected a statement"
+                    help = format!("Unexpected token {token:?}"),
+                    "Expected an expression"
                 )
+                .with_source_code(self.whole.to_string())
                 .into())
             }
         };
@@ -241,11 +321,15 @@ impl<'a> Parser<'a> {
                     .expect_err("checked Err above"))
                 .wrap_err("in place of expected Op");
             }
-
+            dbg!(&op);
             let op = match op.map(|res| res.as_ref().expect("handled Err above")) {
                 None
                 | Some(Token {
-                    kind: TokenKind::RightParen | TokenKind::Semicolon,
+                    kind:
+                        TokenKind::RightParen
+                        | TokenKind::Semicolon
+                        | TokenKind::Comma
+                        | TokenKind::RightBrace,
                     ..
                 }) => break,
                 Some(Token {
@@ -293,7 +377,7 @@ impl<'a> Parser<'a> {
                     ..
                 }) => Op::EqualEqual,
                 Some(token) => {
-                    return Err(diagnostic!(
+                    return Err(miette!(
                         labels = vec![LabeledSpan::at(
                             token.start..token.start + token.origin.len(),
                             "here"
@@ -301,6 +385,7 @@ impl<'a> Parser<'a> {
                         "Expected an operator, got {} instead",
                         token
                     )
+                    .with_source_code(self.whole.to_string())
                     .into());
                 }
             };
@@ -329,6 +414,9 @@ impl<'a> Parser<'a> {
 
             break;
         }
+
+        println!("escaped op loop");
+        dbg!(&lhs);
 
         Ok(lhs)
     }
@@ -416,4 +504,11 @@ fn string() {
 fn print() {
     let program = Parser::new(r#"print "Hello World";"#).parse().unwrap();
     assert_eq!(program.to_string(), r#"(program (print Hello World))"#);
+}
+
+#[test]
+fn var_decl() -> miette::Result<()> {
+    let program = Parser::new("var foo = 3;").parse()?;
+    assert_eq!(program.to_string(), "(program (varDecl foo 3.0))");
+    Ok(())
 }

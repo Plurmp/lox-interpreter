@@ -1,13 +1,17 @@
-use crate::parse::{Atom, Expr, Op};
+use crate::{
+    parse::{Atom, Expr, Op},
+    run::Environment,
+};
 
 use miette::{diagnostic, Error};
 
-pub fn eval_expr<'a>(s: &'a Expr) -> Result<Atom<'a>, Error> {
+pub fn eval_expr<'a>(s: &'a Expr, env: &mut Environment<'a>) -> Result<Atom<'a>, Error> {
     match s {
+        Expr::Atom(Atom::Ident(ident)) => Ok(env.get(ident)?.clone()),
         Expr::Atom(atom) => Ok(atom.clone()),
         Expr::Cons(op, rest) => {
-            let first = rest.get(0).map(|f| eval_expr(f)).transpose()?;
-            let second = rest.get(1).map(|s| eval_expr(s)).transpose()?;
+            let first = rest.get(0).map(|f| eval_expr(f, env)).transpose()?;
+            let second = rest.get(1).map(|s| eval_expr(s, env)).transpose()?;
             match (op, first, second) {
                 (Op::Group, Some(first), None) => Ok(first),
                 (Op::Plus, Some(Atom::Number(first)), Some(Atom::Number(second))) => {
@@ -59,9 +63,13 @@ fn is_truthy(atom: &Atom) -> bool {
 #[allow(unused)]
 macro_rules! test_eval {
     ($expression:literal, $final:expr) => {
+        let mut env = Environment::new();
         let expr = crate::parse::Parser::new($expression).expr().unwrap();
         println!("{expr}");
-        assert_eq!(eval_expr(&expr).expect("Evaluation failed"), $final);
+        assert_eq!(
+            eval_expr(&expr, &mut env).expect("Evaluation failed"),
+            $final
+        );
     };
 }
 

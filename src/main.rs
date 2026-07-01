@@ -13,6 +13,8 @@ use eval::eval_expr;
 use lex::Lexer;
 use parse::Parser;
 
+use crate::run::Environment;
+
 #[derive(ClapParser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
@@ -71,9 +73,10 @@ fn main() -> miette::Result<()> {
         Commands::Evaluate { filename } => {
             let file_contents = read_to_string(filename).into_diagnostic()?;
 
+            let mut env = Environment::new();
             let mut parser = Parser::new(&file_contents);
             let expr = parser.expr()?;
-            println!("{}", eval_expr(&expr)?);
+            println!("{}", eval_expr(&expr, &mut env)?);
         }
         Commands::Run { filename } => {
             let file_contents = read_to_string(filename).into_diagnostic()?;
